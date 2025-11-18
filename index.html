@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>متتبع تحدي المهارات البسيط</title>
+    <!-- CSS بسيط وواضح -->
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Tajawal:wght@400;700;900&display=swap');
         
@@ -15,6 +16,7 @@
             margin: 0;
             padding: 0;
             line-height: 1.6;
+            min-height: 100vh;
         }
         .container {
             max-width: 800px;
@@ -46,6 +48,7 @@
             cursor: pointer;
             transition: background-color 0.3s;
             margin-left: 10px;
+            white-space: nowrap; /* لمنع الكلمات من النزول سطر */
         }
         .btn-primary {
             background-color: #4299e1; /* أزرق أساسي */
@@ -85,6 +88,13 @@
             border-radius: 10px;
             color: white;
             box-shadow: 0 5px #1a202c;
+            border: none;
+            cursor: pointer;
+            transition: transform 0.1s;
+        }
+        .user-btn:active {
+            transform: translateY(2px);
+            box-shadow: 0 3px #1a202c;
         }
         #ala-select { background-color: #3182ce; } /* أزرق */
         #mahmoud-select { background-color: #9f7aea; } /* بنفسجي */
@@ -96,15 +106,18 @@
             height: 20px;
             margin-top: 5px;
             overflow: hidden;
+            text-align: right; /* لجعل النص يبدأ من اليمين */
         }
         .progress-bar {
             height: 100%;
             transition: width 0.5s;
-            text-align: left;
+            text-align: right;
             padding-right: 5px;
             font-size: 0.8rem;
             line-height: 20px;
             color: white;
+            box-sizing: border-box;
+            min-width: 30px; /* لضمان ظهور النص حتى لو كان التقدم صغيراً */
         }
         .progress-complete {
             background-color: #48bb78; /* أخضر للإكمال */
@@ -135,24 +148,41 @@
             padding: 15px;
             border-radius: 10px;
             margin-bottom: 20px;
+            background-color: #2d3748;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
         }
         .winner-ala { color: #4299e1; }
         .winner-mahmoud { color: #9f7aea; }
         .winner-tie { color: #ecc94b; }
-
+        
+        .nav-buttons {
+            display: flex;
+            gap: 10px;
+            justify-content: flex-start;
+        }
+        .nav-buttons .btn {
+            background-color: #4a5568;
+            color: #e2e8f0;
+        }
+        .nav-buttons .btn-primary {
+            background-color: #4299e1;
+            color: white;
+        }
     </style>
 </head>
 <body>
 
     <div id="app" class="container">
-        </div>
+        <!-- سيتم تحميل المحتوى هنا بواسطة JavaScript -->
+    </div>
 
     <script>
         // --- 1. الإعدادات والثوابت ---
         const TARGET_MINUTES = 20;
         const SKILL_COUNT = 3;
-        const TOTAL_DAILY_TARGET = TARGET_MINUTES * SKILL_COUNT;
-
+        const TOTAL_DAILY_TARGET = TARGET_MINUTES * SKILL_COUNT; // 60 دقيقة
+        const STORAGE_KEY = 'challenge_logs_v2'; // تغيير المفتاح لضمان عدم تداخل البيانات القديمة
+        
         const USER_DATA = {
             ala: { name: 'الاء', color: '#4299e1' },
             mahmoud: { name: 'محمود', color: '#9f7aea' }
@@ -162,7 +192,6 @@
             pronunciation: 'النطق',
             listening: 'الاستماع',
         };
-        const STORAGE_KEY = 'challenge_logs';
 
         // --- 2. أدوات مساعدة ---
         const getISODate = (date = new Date()) => {
@@ -174,33 +203,48 @@
         };
 
         const loadLogs = () => {
-            const logs = localStorage.getItem(STORAGE_KEY);
-            return logs ? JSON.parse(logs) : {};
+            try {
+                const logs = localStorage.getItem(STORAGE_KEY);
+                console.log('Logs loaded:', logs);
+                return logs ? JSON.parse(logs) : {};
+            } catch (error) {
+                console.error('Failed to load logs from localStorage:', error);
+                return {};
+            }
         };
 
         const saveLogs = (logs) => {
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(logs));
+            try {
+                localStorage.setItem(STORAGE_KEY, JSON.stringify(logs));
+                console.log('Logs saved successfully.');
+            } catch (error) {
+                console.error('Failed to save logs to localStorage:', error);
+            }
         };
 
         const calculatePerformance = (logs, userId) => {
-            const today = getISODate();
+            // يتم حساب السلسلة (Streak) والأداء الشهري فقط إذا كان هناك سجلات
+            if (!userId) return { monthlyCompletionRate: 0, currentStreak: 0, longestStreak: 0 };
+            
             let completedDays = 0;
             let currentStreak = 0;
             let longestStreak = 0;
             
-            // تحويل السجل إلى مصفوفة بيانات لسهولة المعالجة
+            // استخراج الأيام التي سجل فيها المستخدم وقام بترتيبها
             const userDays = Object.entries(logs)
                 .filter(([date, data]) => data[userId])
                 .map(([date, data]) => ({ date, log: data[userId] }))
-                .sort((a, b) => new Date(a.date) - new Date(b.date));
+                .sort((a, b) => new Date(a.date) - new Date(b.date)); // الأقدم أولاً
 
-            // حساب السلسلة (Streak)
             let lastCompletedDate = null;
+            
             userDays.forEach(day => {
                 if (day.log.isCompleted) {
                     completedDays++;
                     const currentDate = new Date(day.date);
-                    
+                    // إعادة تعيين الوقت إلى منتصف الليل للمقارنة اليومية الدقيقة
+                    currentDate.setHours(0, 0, 0, 0); 
+
                     if (lastCompletedDate) {
                         const timeDiff = currentDate.getTime() - lastCompletedDate.getTime();
                         const dayDiff = Math.round(timeDiff / (1000 * 60 * 60 * 24));
@@ -208,26 +252,35 @@
                         if (dayDiff === 1) {
                             currentStreak++;
                         } else if (dayDiff > 1) {
-                            currentStreak = 1;
+                            currentStreak = 1; // السلسلة انقطعت
                         }
+                        // إذا كان dayDiff === 0 (نفس اليوم)، لا تتغير السلسلة
                     } else {
                         currentStreak = 1;
                     }
+                    
                     longestStreak = Math.max(longestStreak, currentStreak);
                     lastCompletedDate = currentDate;
                 }
             });
             
-            // حساب معدل الإكمال الشهري (تقريبي)
+            // حساب معدل الإكمال الشهري (من بداية الشهر حتى اليوم)
             const todayDate = new Date();
             const startOfMonth = new Date(todayDate.getFullYear(), todayDate.getMonth(), 1);
-            const daysInMonth = Math.floor((todayDate - startOfMonth) / (1000 * 60 * 60 * 24)) + 1;
-            const monthlyCompletionRate = daysInMonth > 0 ? (completedDays / daysInMonth) * 100 : 0;
+            const daysPassedThisMonth = Math.floor((todayDate - startOfMonth) / (1000 * 60 * 60 * 24)) + 1;
             
+            // نعد فقط الأيام التي سجل فيها المستخدم خلال هذا الشهر
+            const monthLogs = userDays.filter(day => new Date(day.date).getMonth() === todayDate.getMonth());
+            const monthlyCompleted = monthLogs.filter(day => day.log.isCompleted).length;
+            
+            const monthlyCompletionRate = daysPassedThisMonth > 0 
+                ? (monthlyCompleted / daysPassedThisMonth) * 100 
+                : 0;
+
             return {
                 monthlyCompletionRate: monthlyCompletionRate.toFixed(1),
-                currentStreak,
-                longestStreak
+                currentStreak: currentStreak,
+                longestStreak: longestStreak
             };
         };
 
@@ -251,7 +304,7 @@
             if (alaMinutes > mahmoudMinutes) return 'ala';
             if (mahmoudMinutes > alaMinutes) return 'mahmoud';
 
-            // 3. تعادل
+            // 3. تعادل (إذا كان هناك تسجيل على الأقل)
             if (alaMinutes > 0 || mahmoudMinutes > 0) return 'tie';
             
             return null;
@@ -261,11 +314,15 @@
         let logs = loadLogs();
         let currentUser = localStorage.getItem('current_user') || null;
         let currentPage = 'dashboard';
-        const appDiv = document.getElementById('app');
+        let appDiv; // سيتم تعيينه لاحقًا في DOMContentLoaded
 
         // --- 4. وظائف العرض (Rendering) ---
-
+        
+        // نقطة الدخول الرئيسية للعرض
         function renderApp() {
+            if (!appDiv) {
+                 appDiv = document.getElementById('app'); // التأكد من تعيينه
+            }
             if (!currentUser) {
                 renderLoginScreen();
             } else {
@@ -284,11 +341,12 @@
                     </div>
                 </div>
             `;
+            // ربط الأحداث
             document.querySelectorAll('.user-btn').forEach(button => {
                 button.addEventListener('click', (e) => {
                     currentUser = e.target.dataset.user;
                     localStorage.setItem('current_user', currentUser);
-                    renderApp();
+                    renderApp(); // إعادة رسم التطبيق
                 });
             });
         }
@@ -303,18 +361,23 @@
                 </header>
                 
                 <nav class="card" style="background-color: #1a202c; padding: 10px;">
-                    <button class="btn ${currentPage === 'dashboard' ? 'btn-primary' : ''}" onclick="changePage('dashboard')">لوحة تحكم ${userName}</button>
-                    <button class="btn ${currentPage === 'comparison' ? 'btn-primary' : ''}" onclick="changePage('comparison')">المقارنة</button>
+                    <div class="nav-buttons">
+                        <button id="nav-dashboard" class="btn ${currentPage === 'dashboard' ? 'btn-primary' : ''}">لوحة تحكم ${userName}</button>
+                        <button id="nav-comparison" class="btn ${currentPage === 'comparison' ? 'btn-primary' : ''}">المقارنة</button>
+                    </div>
                 </nav>
                 
                 <div id="page-content"></div>
             `;
             
+            // ربط أحداث القائمة العلوية
             document.getElementById('logout-btn').addEventListener('click', () => {
                 currentUser = null;
                 localStorage.removeItem('current_user');
                 renderApp();
             });
+            document.getElementById('nav-dashboard').addEventListener('click', () => changePage('dashboard'));
+            document.getElementById('nav-comparison').addEventListener('click', () => changePage('comparison'));
 
             if (currentPage === 'dashboard') {
                 renderDashboard();
@@ -325,23 +388,30 @@
 
         function changePage(page) {
             currentPage = page;
-            renderMainContent();
+            // لا حاجة لـ renderApp، فقط نعيد رسم MainContent لتحديث الأزرار والمحتوى
+            renderMainContent(); 
         }
 
         // لوحة التحكم (Dashboard)
         function renderDashboard() {
             const today = getISODate();
-            const todayLog = logs[today]?.[currentUser] || { skills: { speaking: 0, pronunciation: 0, listening: 0 }, totalMinutes: 0, isCompleted: false, note: '' };
+            // التأكد من أن logs[today] موجود قبل محاولة الوصول إلى currentUser
+            const todayLog = logs[today]?.[currentUser] || { 
+                skills: { speaking: 0, pronunciation: 0, listening: 0 }, 
+                totalMinutes: 0, 
+                isCompleted: false, 
+                note: '' 
+            };
             const { monthlyCompletionRate, currentStreak, longestStreak } = calculatePerformance(logs, currentUser);
             
             const contentDiv = document.getElementById('page-content');
             contentDiv.innerHTML = `
                 <div class="card">
-                    <h2>الحالة اليومية</h2>
+                    <h2>الحالة اليومية: ${today}</h2>
                     <p style="font-size: 1.5rem; font-weight: bold; color: ${todayLog.isCompleted ? '#48bb78' : '#e53e3e'};">
                         ${todayLog.isCompleted ? 'مُكتملة لهذا اليوم! 🎉' : 'لم تكتمل بعد'}
                     </p>
-                    <p>الإجمالي المسجل: ${todayLog.totalMinutes} / ${TOTAL_DAILY_TARGET} دقيقة</p>
+                    <p>الإجمالي المسجل: <strong>${todayLog.totalMinutes}</strong> / ${TOTAL_DAILY_TARGET} دقيقة</p>
                     <button id="open-log-form" class="btn btn-primary" style="margin-top: 10px;">
                         ${todayLog.totalMinutes > 0 ? 'تحديث السجل' : 'تسجيل التقدم'}
                     </button>
@@ -373,12 +443,14 @@
                     </div>` : ''}
                 </div>
             `;
+            // ربط حدث فتح النموذج
             document.getElementById('open-log-form').addEventListener('click', renderLoggingForm);
         }
 
         function renderProgressBar(label, current) {
             const percentage = Math.min(100, (current / TARGET_MINUTES) * 100);
             const color = current >= TARGET_MINUTES ? '#48bb78' : '#f6ad55';
+            const progressClass = current >= TARGET_MINUTES ? 'progress-complete' : 'progress-incomplete';
             
             return `
                 <div style="margin-bottom: 15px;">
@@ -387,8 +459,8 @@
                         <span>${current}/${TARGET_MINUTES} دقيقة</span>
                     </div>
                     <div class="progress-bar-container">
-                        <div class="progress-bar" style="width: ${percentage}%; background-color: ${color};">
-                           ${current}د
+                        <div class="progress-bar ${progressClass}" style="width: ${percentage}%;">
+                           ${current > 0 ? `${current}د` : ''}
                         </div>
                     </div>
                 </div>
@@ -398,13 +470,15 @@
         // نموذج تسجيل الدقائق
         function renderLoggingForm() {
             const today = getISODate();
-            const todayLog = logs[today]?.[currentUser] || { skills: { speaking: 0, pronunciation: 0, listening: 0 }, note: '' };
+            const todayLog = logs[today]?.[currentUser] || { 
+                skills: { speaking: 0, pronunciation: 0, listening: 0 }, 
+                note: '' 
+            };
             
-            // نستخدم نموذج بدلاً من مودال معقد
             const contentDiv = document.getElementById('page-content');
             contentDiv.innerHTML = `
                 <div class="card" id="log-form-card">
-                    <h2>تسجيل تقدم ${USER_DATA[currentUser].name} لليوم</h2>
+                    <h2>تسجيل تقدم ${USER_DATA[currentUser].name} لليوم (${today})</h2>
                     <form id="challenge-form">
                         ${Object.keys(SKILL_NAMES_AR).map(skill => `
                             <div>
@@ -415,7 +489,7 @@
                         
                         <div>
                             <label for="note">ملاحظات اليوم (اختياري)</label>
-                            <textarea id="note" name="note" class="input-field" rows="3">${todayLog.note}</textarea>
+                            <textarea id="note" name="note" class="input-field" rows="3">${todayLog.note || ''}</textarea>
                         </div>
                         
                         <div style="display: flex; justify-content: flex-start; margin-top: 20px;">
@@ -427,6 +501,7 @@
                 </div>
             `;
 
+            // ربط حدث إرسال النموذج
             document.getElementById('challenge-form').addEventListener('submit', handleLogSubmit);
         }
 
@@ -454,47 +529,45 @@
                 winnerClass = '';
             }
 
-            // حساب الإجمالي الشهري
+            // حساب الإجمالي الشهري (الفوز بالأيام)
             let alaWins = 0;
             let mahmoudWins = 0;
-            let totalDays = 0;
             
             Object.values(logs).forEach(dayLog => {
                 const dailyWinner = getDailyWinner(dayLog);
                 if (dailyWinner === 'ala') alaWins++;
                 if (dailyWinner === 'mahmoud') mahmoudWins++;
-                if (dayLog.ala || dayLog.mahmoud) totalDays++;
             });
 
             contentDiv.innerHTML = `
                 <div class="card daily-winner ${winnerClass}">
-                    <h2>نتيجة اليوم:</h2>
+                    <h2>نتيجة اليوم (${today}):</h2>
                     <p>${winnerMessage}</p>
-                    <p style="font-size: 1rem; color: #a0aec0;">
-                       (من يفوز بالإكمال أولاً، أو يسجل دقائق أكثر)
+                    <p style="font-size: 1rem; color: #a0aec0; font-weight: 400;">
+                       (من يكمل الهدف أولاً، أو يسجل دقائق أكثر)
                     </p>
                 </div>
 
                 <div class="grid">
                     <div class="card stat-box">
-                        <h3>فوز ${USER_DATA.ala.name} (شهري)</h3>
+                        <h3>فوز ${USER_DATA.ala.name} (الإجمالي)</h3>
                         <p class="stat-value" style="color: ${USER_DATA.ala.color};">${alaWins}</p>
                     </div>
                     <div class="card stat-box">
-                        <h3>فوز ${USER_DATA.mahmoud.name} (شهري)</h3>
+                        <h3>فوز ${USER_DATA.mahmoud.name} (الإجمالي)</h3>
                         <p class="stat-value" style="color: ${USER_DATA.mahmoud.color};">${mahmoudWins}</p>
                     </div>
                 </div>
 
                 <div class="card" style="margin-top: 20px;">
-                    <h2>الجدول الزمني الشهري</h2>
+                    <h2>الجدول الزمني</h2>
                     <div style="overflow-x: auto; padding-bottom: 10px;">
                         <table style="width: 100%; min-width: 600px; border-collapse: collapse; text-align: center;">
                             <thead>
                                 <tr style="background-color: #4a5568;">
                                     <th style="padding: 10px; border: 1px solid #718096;">اليوم</th>
-                                    <th style="padding: 10px; border: 1px solid #718096;">حالة ${USER_DATA.ala.name}</th>
-                                    <th style="padding: 10px; border: 1px solid #718096;">حالة ${USER_DATA.mahmoud.name}</th>
+                                    <th style="padding: 10px; border: 1px solid #718096;">${USER_DATA.ala.name} (دقيقة)</th>
+                                    <th style="padding: 10px; border: 1px solid #718096;">${USER_DATA.mahmoud.name} (دقيقة)</th>
                                     <th style="padding: 10px; border: 1px solid #718096;">الفائز</th>
                                 </tr>
                             </thead>
@@ -508,7 +581,8 @@
         }
         
         function renderMonthlyTimelineTable() {
-            const allDates = Object.keys(logs).sort().reverse(); // الأحدث أولاً
+            // فرز التواريخ بترتيب تنازلي (الأحدث أولاً)
+            const allDates = Object.keys(logs).sort().reverse(); 
 
             return allDates.map(date => {
                 const dayLog = logs[date];
@@ -517,7 +591,7 @@
                 const winner = getDailyWinner(dayLog);
                 
                 let winnerName = '---';
-                let winnerColor = '#e2e8f0';
+                let winnerColor = '#a0aec0';
 
                 if (winner === 'ala') {
                     winnerName = USER_DATA.ala.name;
@@ -530,18 +604,17 @@
                     winnerColor = '#ecc94b';
                 }
 
-                const formatStatus = (log) => {
-                    const statusText = log.isCompleted ? 'مكتمل ✅' : 'غير مكتمل ❌';
-                    const minutesText = log.totalMinutes > 0 ? `(${log.totalMinutes} د)` : '';
+                const formatMinutes = (log) => {
                     const color = log.isCompleted ? '#48bb78' : '#e53e3e';
-                    return `<span style="color: ${color};">${statusText}</span> ${minutesText}`;
+                    const completionMark = log.isCompleted ? ' ✅' : '';
+                    return log.totalMinutes > 0 ? `<span style="color: ${color};">${log.totalMinutes} د</span>${completionMark}` : 'لم يسجل';
                 };
                 
                 return `
                     <tr style="border-top: 1px solid #4a5568;">
                         <td style="padding: 10px; border: 1px solid #4a5568;">${date}</td>
-                        <td style="padding: 10px; border: 1px solid #4a5568;">${formatStatus(ala)}</td>
-                        <td style="padding: 10px; border: 1px solid #4a5568;">${formatStatus(mahmoud)}</td>
+                        <td style="padding: 10px; border: 1px solid #4a5568;">${formatMinutes(ala)}</td>
+                        <td style="padding: 10px; border: 1px solid #4a5568;">${formatMinutes(mahmoud)}</td>
                         <td style="padding: 10px; border: 1px solid #4a5568;"><span style="color: ${winnerColor}; font-weight: bold;">${winnerName}</span></td>
                     </tr>
                 `;
@@ -560,18 +633,19 @@
 
             let totalMinutes = 0;
             const skills = {};
+            let allSkillsComplete = true;
             
             Object.keys(SKILL_NAMES_AR).forEach(skill => {
                 const minutes = parseInt(form[skill].value) || 0;
                 skills[skill] = minutes;
                 totalMinutes += minutes;
+                if (minutes < TARGET_MINUTES) {
+                    allSkillsComplete = false;
+                }
             });
             
             const note = form.note.value.trim();
-            const isCompleted = totalMinutes >= TOTAL_DAILY_TARGET && 
-                                skills.speaking >= TARGET_MINUTES && 
-                                skills.pronunciation >= TARGET_MINUTES && 
-                                skills.listening >= TARGET_MINUTES;
+            const isCompleted = allSkillsComplete && totalMinutes >= TOTAL_DAILY_TARGET;
 
             // تحديث السجل المحلي
             if (!logs[today]) {
@@ -591,11 +665,19 @@
             messageEl.style.color = '#48bb78';
             
             // العودة إلى لوحة التحكم بعد 1.5 ثانية
-            setTimeout(renderMainContent, 1500);
+            setTimeout(() => {
+                currentPage = 'dashboard'; // التأكد من العودة للصفحة الصحيحة
+                renderMainContent();
+            }, 1500);
         }
-
+        
         // --- 6. بدء التطبيق ---
-        renderApp();
+        // نضمن تشغيل الدالة renderApp فقط بعد تحميل جميع عناصر DOM
+        document.addEventListener('DOMContentLoaded', () => {
+            console.log("DOM Content Loaded. Starting App.");
+            appDiv = document.getElementById('app');
+            renderApp();
+        });
     </script>
 </body>
 </html>
