@@ -1,0 +1,690 @@
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, doc, setDoc, collection, query, where, onSnapshot, Timestamp } from 'firebase/firestore';
+import { Chart as ChartJS, CategoryScale, LinearScale, BarElement, Title, Tooltip, Legend } from 'chart.js';
+import { Bar } from 'react-chartjs-2';
+import { setLogLevel } from 'firebase/firestore';
+
+// Register Chart.js components
+ChartJS.register(CategoryScale, LinearScale, BarElement, Title, Tooltip, Legend);
+
+// --- GLOBAL FIREBASE CONFIGURATION & INITIALIZATION ---
+const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-challenge-app';
+// الهدف لكل مهارة هو 20 دقيقة (يستخدم كحد أدنى للإكمال وليس كحد أقصى للتسجيل)
+const TARGET_MINUTES = 20; 
+// إجمالي الهدف اليومي هو 60 دقيقة
+const TOTAL_DAILY_TARGET = TARGET_MINUTES * 3;
+
+// Set Firestore log level for debugging
+setLogLevel('debug');
+
+const app = initializeApp(firebaseConfig);
+const db = getFirestore(app);
+const auth = getAuth(app);
+
+// --- UTILITIES AND CONSTANTS ---
+
+const USER_DISPLAY_NAMES = {
+    ala: 'الاء',
+    mahmoud: 'محمود'
+};
+
+const SKILL_NAMES_AR = {
+    speaking: 'التحدث',
+    pronunciation: 'النطق',
+    listening: 'الاستماع',
+};
+
+const getUserDisplayName = (id) => USER_DISPLAY_NAMES[id] || id;
+
+// Calculates streak and completion rate
+const calculatePerformance = (logs, userId, startDate) => {
+    let completedDays = 0;
+    let currentStreak = 0;
+    let longestStreak = 0;
+    const today = new Date();
+
+    logs.sort((a, b) => new Date(a.date) - new Date(b.date));
+
+    // Calculate completed days in the current month
+    const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+    const daysInMonth = (today - startOfMonth) / (1000 * 60 * 60 * 24) + 1;
+
+    for (let i = 0; i < logs.length; i++) {
+        const log = logs[i];
+        if (log.userId === userId) {
+            if (log.isCompleted) {
+                completedDays++;
+
+                // Streak calculation
+                const currentDate = new Date(log.date);
+                // Simple streak check - assumes sorted by date
+                let prevLogDate = null;
+                for(let j = i - 1; j >= 0; j--) {
+                    if (logs[j].userId === userId) {
+                        prevLogDate = new Date(logs[j].date);
+                        break;
+                    }
+                }
+
+                if (prevLogDate) {
+                    const timeDiff = currentDate.getTime() - prevLogDate.getTime();
+                    const dayDiff = Math.round(timeDiff / (1000 * 3600 * 24));
+
+                    if (dayDiff === 1) {
+                        currentStreak++;
+                    } else if (dayDiff > 1) {
+                        currentStreak = 1;
+                    }
+                } else {
+                    currentStreak = 1;
+                }
+                longestStreak = Math.max(longestStreak, currentStreak);
+            } else {
+                currentStreak = 0;
+            }
+        }
+    }
+
+    const monthlyCompletionRate = daysInMonth > 0 ? (completedDays / daysInMonth) * 100 : 0;
+
+    return { monthlyCompletionRate: monthlyCompletionRate.toFixed(1), currentStreak, longestStreak };
+};
+
+// Gets the date in YYYY-MM-DD format
+const getISODate = (date = new Date()) => {
+    return date.toISOString().split('T')[0];
+};
+
+// Determines the winner based on completion status, then total minutes
+const getDailyWinner = (logs) => {
+    if (logs.length === 0) return null;
+
+    const ala = logs.find(l => l.userId === 'ala');
+    const mahmoud = logs.find(l => l.userId === 'mahmoud');
+
+    if (!ala && !mahmoud) return null;
+
+    // 1. Check for completion
+    if (ala?.isCompleted && !mahmoud?.isCompleted) return 'Alaa';
+    if (!ala?.isCompleted && mahmoud?.isCompleted) return 'Mahmoud';
+
+    // 2. If both completed or both not completed, check total minutes
+    const alaMinutes = ala?.totalMinutes || 0;
+    const mahmoudMinutes = mahmoud?.totalMinutes || 0;
+
+    if (alaMinutes > mahmoudMinutes) return 'Alaa';
+    if (mahmoudMinutes > alaMinutes) return 'Mahmoud';
+
+    // 3. If minutes are equal or neither logged, it's a tie (if anyone logged)
+    if (alaMinutes > 0 || mahmoudMinutes > 0) return 'Tie';
+    
+    return null; // No logs at all
+};
+
+// --- REUSABLE UI COMPONENTS ---
+
+const GlassCard = ({ children, className = '', title, flexCol = true }) => (
+    <div
+        className={`bg-white/5 backdrop-blur-md rounded-2xl shadow-xl border border-white/10 p-4 sm:p-6 transition duration-300 ${className} ${flexCol ? 'flex flex-col' : ''}`}
+    >
+        {title && <h3 className="text-xl font-semibold mb-4 text-white/90 text-right">{title}</h3>}
+        {children}
+    </div>
+);
+
+const ProgressBar = ({ label, current, max = TARGET_MINUTES, color }) => {
+    const percentage = Math.min(100, (current / max) * 100);
+    // Display actual minutes even if they exceed max for the progress bar visually
+    const displayValue = `${current}/${max} دقيقة`; 
+    const progressColor = current >= max ? 'bg-green-500' : color;
+    
+    return (
+        <div className="mb-4">
+            <div className="flex justify-between mb-1 text-sm font-medium text-white/80 text-right">
+                <span>{label}</span>
+                <span>{displayValue}</span>
+            </div>
+            <div className="w-full bg-white/10 rounded-full h-2.5">
+                <div 
+                    className={`h-2.5 rounded-full transition-all duration-500 ${progressColor}`} 
+                    style={{ width: `${percentage}%` }}
+                ></div>
+            </div>
+        </div>
+    );
+};
+
+const UserButton = ({ user, onClick }) => (
+    <button
+        onClick={() => onClick(user)}
+        className={`w-full py-4 px-6 rounded-xl text-2xl font-bold transition-all duration-300 transform hover:scale-[1.03] shadow-lg
+        ${user === 'ala' ? 'bg-sky-700 hover:bg-sky-600' : 'bg-purple-700 hover:bg-purple-600'}
+        text-white ring-4 ring-white/20`}
+    >
+        {getUserDisplayName(user)}
+    </button>
+);
+
+// --- FEATURE COMPONENTS ---
+
+const LoginScreen = ({ setCurrentUser }) => {
+    return (
+        <div className="min-h-screen flex items-center justify-center p-4 bg-gray-900" dir="rtl">
+            <GlassCard title="اختر حسابك" className="w-full max-w-sm">
+                <p className="text-white/70 mb-8 text-center text-lg">
+                    اختر اسمك لتسجيل تقدم التحدي اليومي.
+                </p>
+                <div className="space-y-6">
+                    <UserButton user="ala" onClick={() => setCurrentUser('ala')} />
+                    <UserButton user="mahmoud" onClick={() => setCurrentUser('mahmoud')} />
+                </div>
+            </GlassCard>
+        </div>
+    );
+};
+
+const LoggingModal = ({ currentUser, logs, onClose }) => {
+    const todayLog = logs.find(log => log.userId === currentUser && log.date === getISODate());
+    const initialMinutes = todayLog?.skills || { speaking: 0, pronunciation: 0, listening: 0 };
+    const initialNote = todayLog?.note || '';
+
+    const [minutes, setMinutes] = useState(initialMinutes);
+    const [note, setNote] = useState(initialNote);
+    const [isSaving, setIsSaving] = useState(false);
+    const [message, setMessage] = useState('');
+
+    const totalLogged = minutes.speaking + minutes.pronunciation + minutes.listening;
+    const isChallengeComplete = totalLogged >= TOTAL_DAILY_TARGET;
+    const userName = getUserDisplayName(currentUser);
+
+    const handleMinuteChange = (skill, value) => {
+        // تم إزالة الحد الأقصى (20 دقيقة) للسماح بتسجيل أي عدد من الدقائق
+        const num = Math.max(0, parseInt(value) || 0);
+        setMinutes(prev => ({ ...prev, [skill]: num }));
+    };
+
+    const handleSave = async (e) => {
+        e.preventDefault();
+        if (isSaving) return;
+
+        setIsSaving(true);
+        setMessage('');
+
+        try {
+            const todayISO = getISODate();
+            const docId = `${todayISO}-${currentUser}`;
+            const docRef = doc(db, `artifacts/${appId}/public/data/challenges`, docId);
+
+            const data = {
+                userId: currentUser,
+                userName: userName,
+                date: todayISO,
+                skills: minutes,
+                totalMinutes: totalLogged,
+                isCompleted: isChallengeComplete,
+                note: note.trim(),
+                timestamp: Timestamp.now(),
+            };
+
+            await setDoc(docRef, data, { merge: true });
+
+            setMessage('تم حفظ التقدم بنجاح!');
+            setTimeout(onClose, 1500); // Close after showing success
+        } catch (error) {
+            console.error('Error saving progress:', error);
+            setMessage('فشل حفظ التقدم. تحقق من وحدة التحكم (الكونسول) للتفاصيل.');
+        } finally {
+            setIsSaving(false);
+        }
+    };
+
+    return (
+        <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4" dir="rtl">
+            <GlassCard title={`سجل تقدمك يا ${userName}`} className="w-full max-w-lg">
+                <form onSubmit={handleSave}>
+                    {['speaking', 'pronunciation', 'listening'].map((skill) => (
+                        <div key={skill} className="mb-4 text-right">
+                            <label className="block text-sm font-medium text-white/80 mb-1">
+                                {SKILL_NAMES_AR[skill]} (هدف اليوم {TARGET_MINUTES} دقيقة، يمكنك تسجيل المزيد)
+                            </label>
+                            {/* حقل الإدخال الرقمي - تم إزالة الحد الأقصى (max) */}
+                            <input
+                                type="number"
+                                value={minutes[skill]}
+                                onChange={(e) => handleMinuteChange(skill, e.target.value)}
+                                min="0"
+                                className="w-full p-2 bg-white/10 text-white border border-white/20 rounded-lg focus:ring-sky-500 focus:border-sky-500 transition text-right"
+                                required
+                            />
+                        </div>
+                    ))}
+
+                    <div className="mt-6 p-3 rounded-xl bg-white/10 text-lg font-bold text-center">
+                        إجمالي الدقائق المسجلة: {totalLogged} / {TOTAL_DAILY_TARGET} دقيقة (أو أكثر)
+                    </div>
+                    
+                    {isChallengeComplete && (
+                        <div className="mt-4 p-3 text-center bg-green-500/20 text-green-300 border border-green-500 rounded-xl font-bold">
+                            🎉 لقد أكملت تحدي اليوم!
+                        </div>
+                    )}
+                    
+                    <div className="mt-4 text-right">
+                        <label className="block text-sm font-medium text-white/80 mb-1">ملاحظة اختيارية</label>
+                        <textarea
+                            value={note}
+                            onChange={(e) => setNote(e.target.value)}
+                            rows="2"
+                            placeholder="على سبيل المثال: تدربت على المحادثة اليابانية."
+                            className="w-full p-2 bg-white/10 text-white border border-white/20 rounded-lg focus:ring-sky-500 focus:border-sky-500 transition text-right"
+                        ></textarea>
+                    </div>
+
+                    <div className="flex justify-start space-x-4 mt-6">
+                        <button
+                            type="button"
+                            onClick={onClose}
+                            className="px-6 py-3 bg-gray-600 hover:bg-gray-500 text-white rounded-xl font-semibold transition-all"
+                            disabled={isSaving}
+                        >
+                            إلغاء
+                        </button>
+                        <button
+                            type="submit"
+                            className={`px-6 py-3 rounded-xl font-semibold transition-all flex items-center ${isSaving ? 'bg-sky-800' : 'bg-sky-600 hover:bg-sky-500'}`}
+                            disabled={isSaving}
+                        >
+                            {isSaving ? (
+                                <>
+                                    <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                                    جارٍ الحفظ...
+                                </>
+                            ) : (
+                                'حفظ التقدم'
+                            )}
+                        </button>
+                    </div>
+                    {message && <p className={`mt-4 text-center text-sm ${message.includes('نجاح') ? 'text-green-400' : 'text-red-400'}`}>{message}</p>}
+                </form>
+            </GlassCard>
+        </div>
+    );
+};
+
+const Dashboard = ({ currentUser, allLogs, openLogModal }) => {
+    const todayISO = getISODate();
+    const todayLog = allLogs.find(log => log.userId === currentUser && log.date === todayISO);
+    const userName = getUserDisplayName(currentUser);
+
+    const { monthlyCompletionRate, currentStreak, longestStreak } = useMemo(() => {
+        return calculatePerformance(allLogs, currentUser, todayISO);
+    }, [allLogs, currentUser, todayISO]);
+
+    const totalMinutesToday = todayLog?.totalMinutes || 0;
+    const isCompleted = todayLog?.isCompleted || false;
+
+    const chartData = useMemo(() => {
+        const last7Days = [];
+        for (let i = 6; i >= 0; i--) {
+            const date = new Date();
+            date.setDate(date.getDate() - i);
+            last7Days.push(getISODate(date));
+        }
+
+        const dataPoints = last7Days.map(date => {
+            const log = allLogs.find(l => l.userId === currentUser && l.date === date);
+            return log?.totalMinutes || 0;
+        });
+
+        return {
+            labels: last7Days.map(date => new Date(date).toLocaleDateString('ar-EG', { weekday: 'short' })),
+            datasets: [
+                {
+                    label: 'الدقائق المسجلة',
+                    data: dataPoints,
+                    backgroundColor: 'rgba(56, 189, 248, 0.6)', // Sky-400
+                    borderColor: 'rgba(56, 189, 248, 1)',
+                    borderWidth: 1,
+                    borderRadius: 8,
+                },
+            ],
+        };
+    }, [allLogs, currentUser]);
+
+    const chartOptions = {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+            legend: { display: false },
+            title: { display: true, text: 'نشاط آخر 7 أيام', color: '#CBD5E1', font: { family: 'Tajawal, sans-serif' } },
+            tooltip: {
+                rtl: true,
+                backgroundColor: 'rgba(0,0,0,0.8)',
+                titleColor: '#fff',
+                bodyColor: '#fff',
+            }
+        },
+        scales: {
+            x: {
+                grid: { color: 'rgba(255, 255, 255, 0.1)' },
+                ticks: { color: '#CBD5E1', font: { family: 'Tajawal, sans-serif' } },
+            },
+            y: {
+                max: TOTAL_DAILY_TARGET,
+                min: 0,
+                grid: { color: 'rgba(255, 255, 255, 0.1)' },
+                ticks: { color: '#CBD5E1', font: { family: 'Tajawal, sans-serif' } },
+                title: { display: true, text: 'إجمالي الدقائق', color: '#CBD5E1', font: { family: 'Tajawal, sans-serif' } },
+            },
+        },
+    };
+
+    return (
+        <div className="p-4 sm:p-8 space-y-6 text-white" dir="rtl">
+            <h1 className="text-3xl sm:text-4xl font-extrabold text-white/95 text-right">لوحة تحكم {userName}</h1>
+
+            {/* Daily Status and Quick Log */}
+            <GlassCard className="flex flex-col sm:flex-row items-center justify-between text-right" flexCol={false}>
+                <div className="mb-4 sm:mb-0">
+                    <p className="text-sm font-semibold text-white/70">حالة اليوم:</p>
+                    <div className={`text-2xl font-bold ${isCompleted ? 'text-green-400' : 'text-red-400'}`}>
+                        {isCompleted ? 'مُكتمل' : 'لم يكتمل بعد'}
+                    </div>
+                    <p className="text-lg text-white/80 mt-1">المسجل: {totalMinutesToday} / {TOTAL_DAILY_TARGET} دقيقة</p>
+                </div>
+                <button
+                    onClick={openLogModal}
+                    className="mt-4 sm:mt-0 px-6 py-3 bg-sky-600 hover:bg-sky-500 text-white rounded-xl font-bold transition-all transform hover:scale-[1.03] shadow-lg ring-4 ring-sky-700/50 text-base sm:text-lg"
+                >
+                    {todayLog ? 'تحديث السجل' : 'تسجيل الدقائق'}
+                </button>
+            </GlassCard>
+
+            {/* Streaks and Completion Rate */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
+                <GlassCard title="السلسلة الحالية (أيام)" className="text-center">
+                    <p className="text-5xl font-extrabold text-sky-400">{currentStreak}</p>
+                </GlassCard>
+                <GlassCard title="أطول سلسلة (أيام)" className="text-center">
+                    <p className="text-5xl font-extrabold text-purple-400">{longestStreak}</p>
+                </GlassCard>
+                <GlassCard title="إكمال الشهر" className="text-center">
+                    <p className="text-5xl font-extrabold text-green-400">{monthlyCompletionRate}%</p>
+                </GlassCard>
+            </div>
+
+            {/* Daily Progress Details */}
+            <GlassCard title="تفاصيل الدقائق اليومية">
+                {/* ProgressBar uses TARGET_MINUTES=20 as max, allowing it to display progress past 100% visually, but the bar fills up at 20 */}
+                <ProgressBar label={SKILL_NAMES_AR.speaking} current={todayLog?.skills?.speaking || 0} color="bg-yellow-500" />
+                <ProgressBar label={SKILL_NAMES_AR.pronunciation} current={todayLog?.skills?.pronunciation || 0} color="bg-red-500" />
+                <ProgressBar label={SKILL_NAMES_AR.listening} current={todayLog?.skills?.listening || 0} color="bg-blue-500" />
+                {todayLog?.note && (
+                    <div className="mt-4 pt-4 border-t border-white/10 text-right">
+                        <p className="text-sm font-semibold text-white/70 mb-1">ملاحظة اليوم:</p>
+                        <p className="text-white/80 italic text-sm">{todayLog.note}</p>
+                    </div>
+                )}
+            </GlassCard>
+
+            {/* Weekly Progress Chart */}
+            <GlassCard title="مخطط النشاط الأسبوعي" className="h-[300px] sm:h-[400px] p-4">
+                <div className="flex-grow relative">
+                    <Bar options={chartOptions} data={chartData} />
+                </div>
+            </GlassCard>
+        </div>
+    );
+};
+
+const ComparisonPage = ({ allLogs }) => {
+    const todayISO = getISODate();
+    const todayLogs = allLogs.filter(log => log.date === todayISO);
+    const dailyWinner = getDailyWinner(todayLogs);
+
+    // Filter logs for the current week and month
+    const today = new Date();
+    const startOfMonth = getISODate(new Date(today.getFullYear(), today.getMonth(), 1));
+    // تم إصلاح خطأ منطقي هنا: يجب أن لا تعدل الدالة `setDate` التاريخ الأصلي
+    const tempDate = new Date();
+    const startOfWeek = getISODate(new Date(tempDate.setDate(tempDate.getDate() - tempDate.getDay())));
+
+    const weeklyLogs = allLogs.filter(log => log.date >= startOfWeek);
+    const monthlyLogs = allLogs.filter(log => log.date >= startOfMonth);
+
+    const calculateWins = (logs) => {
+        const wins = { ala: 0, mahmoud: 0 };
+        const dates = [...new Set(logs.map(log => log.date))];
+
+        dates.forEach(date => {
+            const dailyLogs = logs.filter(log => log.date === date);
+            const winner = getDailyWinner(dailyLogs);
+            if (winner === 'Alaa') wins.ala++;
+            if (winner === 'Mahmoud') wins.mahmoud++;
+        });
+        return wins;
+    };
+
+    const weeklyWins = calculateWins(weeklyLogs);
+    const monthlyWins = calculateWins(monthlyLogs);
+    
+    // Create the monthly timeline array
+    const monthlyTimeline = useMemo(() => {
+        const timeline = [];
+        let dateCursor = new Date(startOfMonth);
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+
+        while (dateCursor <= today) {
+            const isoDate = getISODate(dateCursor);
+            const logsForDay = allLogs.filter(log => log.date === isoDate);
+
+            timeline.push({
+                date: isoDate,
+                alaCompleted: logsForDay.some(l => l.userId === 'ala' && l.isCompleted),
+                mahmoudCompleted: logsForDay.some(l => l.userId === 'mahmoud' && l.isCompleted),
+                winner: getDailyWinner(logsForDay)
+            });
+            dateCursor.setDate(dateCursor.getDate() + 1);
+        }
+        return timeline;
+    }, [allLogs, startOfMonth]);
+
+    const winnerColor = (winner) => {
+        if (winner === 'Alaa') return 'text-sky-400';
+        if (winner === 'Mahmoud') return 'text-purple-400';
+        return 'text-gray-400';
+    };
+    
+    const getWinnerDisplayName = (winner) => {
+        if (winner === 'Alaa') return getUserDisplayName('ala');
+        if (winner === 'Mahmoud') return getUserDisplayName('mahmoud');
+        return 'تعادل';
+    };
+
+    return (
+        <div className="p-4 sm:p-8 space-y-6 text-white" dir="rtl">
+            <h1 className="text-3xl sm:text-4xl font-extrabold text-white/95 text-right">مقارنة التحدي</h1>
+
+            {/* Daily Winner Card */}
+            <GlassCard title="فائز اليوم" className="text-center">
+                <div className="mb-4">
+                    {dailyWinner ? (
+                        <p className={`text-4xl sm:text-5xl font-black ${winnerColor(dailyWinner)}`}>
+                            {dailyWinner === 'Tie' ? 'تعادل!' : `${getWinnerDisplayName(dailyWinner)} يفوز!`}
+                        </p>
+                    ) : (
+                        <p className="text-xl text-white/70">لم يسجل أحد التقدم بعد.</p>
+                    )}
+                </div>
+            </GlassCard>
+
+            {/* Weekly and Monthly Scoreboard */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+                <GlassCard title="لوحة نتائج الأسبوع" className="text-center">
+                    <p className="text-2xl font-semibold mb-2 text-sky-400">{getUserDisplayName('ala')}: {weeklyWins.ala} فوز</p>
+                    <p className="text-2xl font-semibold text-purple-400">{getUserDisplayName('mahmoud')}: {weeklyWins.mahmoud} فوز</p>
+                </GlassCard>
+                <GlassCard title="لوحة نتائج الشهر" className="text-center">
+                    <p className="text-2xl font-semibold mb-2 text-sky-400">{getUserDisplayName('ala')}: {monthlyWins.ala} فوز</p>
+                    <p className="text-2xl font-semibold text-purple-400">{getUserDisplayName('mahmoud')}: {monthlyWins.mahmoud} فوز</p>
+                </GlassCard>
+            </div>
+
+            {/* Monthly Timeline View */}
+            <GlassCard title="الجدول الزمني للإكمال الشهري (أخضر=مكتمل، أحمر=فائت)">
+                <div className="flex flex-wrap gap-2 justify-end"> {/* Use justify-end for RTL flow */}
+                    {monthlyTimeline.map((day, index) => (
+                        <div key={day.date} className="text-center p-2 rounded-lg bg-white/5 w-16 sm:w-20 flex flex-col shadow-inner">
+                            <p className="text-xs font-bold text-white/70 mb-1">{new Date(day.date).getDate()}</p>
+                            <div className="flex justify-center space-x-1">
+                                <div title="حالة الاء" className={`w-3 h-3 rounded-full border border-white/20 ${day.alaCompleted ? 'bg-green-500' : 'bg-red-500'}`}></div>
+                                <div title="حالة محمود" className={`w-3 h-3 rounded-full border border-white/20 ${day.mahmoudCompleted ? 'bg-green-500' : 'bg-red-500'}`}></div>
+                            </div>
+                            <p className={`text-[10px] mt-1 ${day.winner === 'Alaa' ? 'text-sky-400' : day.winner === 'Mahmoud' ? 'text-purple-400' : 'text-gray-500'}`}>
+                                {day.winner === 'Tie' ? 'ت.' : day.winner ? getWinnerDisplayName(day.winner).substring(0, 2) : ''}
+                            </p>
+                        </div>
+                    ))}
+                </div>
+            </GlassCard>
+        </div>
+    );
+};
+
+// --- MAIN APP COMPONENT ---
+
+const App = () => {
+    const [isAuthenticated, setIsAuthenticated] = useState(false);
+    const [userId, setUserId] = useState(null);
+    const [currentUser, setCurrentUser] = useState(null); // 'ala' or 'mahmoud'
+    const [allLogs, setAllLogs] = useState([]);
+    const [isLogModalOpen, setIsLogModalOpen] = useState(false);
+    const [currentPage, setCurrentPage] = useState('dashboard'); // 'dashboard', 'comparison'
+
+    // 1. Firebase Authentication
+    useEffect(() => {
+        const authenticate = async () => {
+            try {
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+            } catch (error) {
+                console.error("Firebase authentication error:", error);
+            }
+        };
+
+        const unsubscribe = onAuthStateChanged(auth, (user) => {
+            if (user) {
+                setUserId(user.uid);
+                setIsAuthenticated(true);
+            } else {
+                authenticate();
+            }
+        });
+
+        return () => unsubscribe();
+    }, []);
+
+    // 2. Firestore Real-time Data Listener
+    useEffect(() => {
+        if (!isAuthenticated) return;
+
+        // Query documents from the public challenge collection
+        const q = query(collection(db, `artifacts/${appId}/public/data/challenges`));
+
+        const unsubscribe = onSnapshot(q, (querySnapshot) => {
+            const logs = [];
+            querySnapshot.forEach((doc) => {
+                logs.push(doc.data());
+            });
+            setAllLogs(logs);
+        }, (error) => {
+            console.error("Firestore onSnapshot error:", error);
+        });
+
+        return () => unsubscribe();
+    }, [isAuthenticated]);
+
+
+    if (!isAuthenticated) {
+        return <div className="min-h-screen bg-gray-900 flex items-center justify-center text-white" dir="rtl">جارٍ تحميل المصادقة...</div>;
+    }
+
+    if (!currentUser) {
+        return <LoginScreen setCurrentUser={setCurrentUser} />;
+    }
+    
+    const userName = getUserDisplayName(currentUser);
+
+    const navigation = [
+        { id: 'dashboard', label: `لوحة تحكم ${userName}` },
+        { id: 'comparison', label: 'الاء مقابل محمود' },
+    ];
+
+    return (
+        <div className="min-h-screen bg-gray-900 font-sans" dir="rtl">
+            {/* Header / Navigation */}
+            <header className="sticky top-0 z-10 bg-black/50 backdrop-blur-lg border-b border-white/10 p-4 shadow-xl">
+                <div className="flex justify-between items-center max-w-4xl mx-auto">
+                    <h1 className="text-xl font-bold text-white">متتبع تحدي المهارات</h1>
+                    <div className="text-sm font-medium">
+                        <button 
+                            onClick={() => setCurrentUser(null)}
+                            className="text-red-400 hover:text-red-300 transition duration-300 p-2 rounded-lg bg-white/5"
+                            title="تسجيل الخروج واختيار مستخدم آخر"
+                        >
+                            تسجيل الخروج ({userName})
+                        </button>
+                    </div>
+                </div>
+            </header>
+
+            {/* Main Navigation Tabs (Mobile-Friendly) */}
+            <nav className="bg-black/40 backdrop-blur-md border-b border-white/10 sticky top-[57px] z-10">
+                <div className="flex max-w-4xl mx-auto">
+                    {navigation.map(item => (
+                        <button
+                            key={item.id}
+                            onClick={() => setCurrentPage(item.id)}
+                            className={`flex-1 py-3 text-center text-sm sm:text-base font-semibold transition-colors duration-300
+                                ${currentPage === item.id ? 'text-sky-400 border-b-4 border-sky-500' : 'text-white/70 hover:text-white/90'}`
+                            }
+                        >
+                            {item.label}
+                        </button>
+                    ))}
+                </div>
+            </nav>
+
+            <main className="max-w-4xl mx-auto pb-16">
+                {currentPage === 'dashboard' && (
+                    <Dashboard 
+                        currentUser={currentUser} 
+                        allLogs={allLogs} 
+                        openLogModal={() => setIsLogModalOpen(true)} 
+                    />
+                )}
+                {currentPage === 'comparison' && (
+                    <ComparisonPage allLogs={allLogs} />
+                )}
+            </main>
+
+            {isLogModalOpen && (
+                <LoggingModal 
+                    currentUser={currentUser} 
+                    logs={allLogs} 
+                    onClose={() => setIsLogModalOpen(false)} 
+                />
+            )}
+        </div>
+    );
+};
+
+export default App;
