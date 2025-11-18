@@ -36,7 +36,6 @@
 
     <div id="app-root">
         <!-- Application content will be rendered here by JavaScript -->
-        <div class="min-h-screen flex items-center justify-center text-xl">جارٍ تحميل التطبيق...</div>
     </div>
 
     <script type="text/javascript">
@@ -171,7 +170,8 @@
         let db, auth;
         
         let appState = {
-            isAuthenticated: false,
+            isAuthenticated: false, // Will be true after successful sign-in
+            isAuthReady: false,     // Will be true after onAuthStateChanged fires for the first time
             userId: null,
             currentUser: null, // 'ala' or 'mahmoud'
             allLogs: [],
@@ -718,12 +718,13 @@
             const root = document.getElementById('app-root');
             let contentHTML = '';
 
-            if (!appState.isAuthenticated) {
-                // Show loading/authentication screen (handled by initial check)
-                root.innerHTML = `<div class="min-h-screen flex items-center justify-center text-xl text-white">جارٍ تحميل المصادقة...</div>`;
+            if (!appState.isAuthReady) {
+                // Show a brief, non-intrusive loading message while waiting for the first Firebase check
+                root.innerHTML = `<div class="min-h-screen flex items-center justify-center text-xl text-white/50">... جاري التحقق من المصادقة</div>`;
                 return;
             }
 
+            // At this point, isAuthReady is true. We check if a user is selected.
             if (!appState.currentUser) {
                 contentHTML = renderLoginScreen();
             } else {
@@ -751,11 +752,11 @@
             root.innerHTML = contentHTML;
 
             // --- Attach Global Event Listeners after rendering ---
-            if (!appState.currentUser) {
+            if (appState.isAuthReady && !appState.currentUser) {
                 document.querySelectorAll('.user-select-button').forEach(button => {
                     button.addEventListener('click', (e) => updateState({ currentUser: e.target.dataset.userId }));
                 });
-            } else {
+            } else if (appState.currentUser) {
                 document.getElementById('logout-button')?.addEventListener('click', () => updateState({ currentUser: null }));
                 document.querySelectorAll('.nav-tab').forEach(button => {
                     button.addEventListener('click', (e) => updateState({ currentPage: e.target.dataset.pageId }));
@@ -785,9 +786,11 @@
             // 1. Authentication Listener
             onAuthStateChanged(auth, async (user) => {
                 if (user) {
-                    updateState({ isAuthenticated: true, userId: user.uid });
+                    // Auth succeeded (anonymous or custom token)
+                    updateState({ isAuthenticated: true, userId: user.uid, isAuthReady: true });
                     setupFirestoreListener();
                 } else {
+                    // Try to sign in if not already signed in
                     try {
                         if (initialAuthToken) {
                             await signInWithCustomToken(auth, initialAuthToken);
@@ -796,8 +799,8 @@
                         }
                     } catch (error) {
                         console.error("Firebase authentication error:", error);
-                        // Fallback to loading screen if auth fails
-                        updateState({ isAuthenticated: false });
+                        // If auth fails, mark ready but not authenticated.
+                        updateState({ isAuthReady: true, isAuthenticated: false });
                     }
                 }
             });
@@ -824,7 +827,7 @@
 
         // --- ENTRY POINT ---
         window.onload = () => {
-            // Force an initial render to show the 'loading authentication' message
+            // Render the initial loading state (now much quicker)
             renderApp(); 
 
             // Wait for Firebase modules to load via <script type="module">
